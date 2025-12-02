@@ -8,4 +8,4 @@ An AI Study app that takes in inputs (lecture slides, lecture notes, exam dates,
 - Cheat cheat generator 
 
 ## Tech
-Python, NumPy, matplotlib, optional Streamlit UI.
+Python, NumPy, matplotlib,
