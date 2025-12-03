@@ -5,6 +5,12 @@ import shutil
 from pathlib import Path
 from datetime import datetime, date, timedelta
 
+from dotenv import load_dotenv
+from openai import OpenAI
+from pypdf import PdfReader
+from pptx import Presentation
+
+
 # -----------------------------------------
 # Paths and basic storage helpers
 # -----------------------------------------
@@ -21,6 +27,12 @@ def ensure_data_dirs():
     COURSES_DIR.mkdir(exist_ok=True)
     if not COURSES_FILE.exists():
         COURSES_FILE.write_text(json.dumps({"courses": []}, indent=2))
+
+
+# Load environment variables and set up OpenAI
+load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 
 def load_courses():
@@ -131,6 +143,117 @@ def make_unique_filename(folder: Path, original_name: str) -> str:
         candidate = f"{base}_{counter}{ext}"
         counter += 1
     return candidate
+
+
+def extract_text_from_file(file_path: Path) -> str:
+    """
+    Extract plain text from a course file.
+    Currently supports: PDF (.pdf), PowerPoint (.pptx/.ppt), and text files (.txt/.md).
+    """
+    suffix = file_path.suffix.lower()
+    try:
+        if suffix == ".pdf":
+            reader = PdfReader(str(file_path))
+            texts = []
+            for page in reader.pages:
+                content = page.extract_text() or ""
+                texts.append(content)
+            return "\n\n".join(texts)
+
+        elif suffix in [".pptx", ".ppt"]:
+            prs = Presentation(str(file_path))
+            texts = []
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text"):
+                        texts.append(shape.text)
+            return "\n\n".join(texts)
+
+        elif suffix in [".txt", ".md"]:
+            return file_path.read_text(errors="ignore")
+
+        else:
+            # Unsupported type for now
+            return ""
+    except Exception:
+        # If anything goes wrong parsing a file, just skip its content
+        return ""
+
+
+def generate_flashcards_from_text(text: str, num_cards: int = 20) -> list[dict]:
+    """
+    Call the OpenAI API to generate term/definition flashcards from the given text.
+    Returns a list of dicts: [{"front": "...", "back": "..."}, ...]
+    """
+    if not client:
+        raise RuntimeError("OpenAI client is not configured. Missing OPENAI_API_KEY.")
+
+    # Keep the prompt reasonably sized
+    MAX_CHARS = 12000
+    if len(text) > MAX_CHARS:
+        text = text[:MAX_CHARS]
+
+    prompt = f"""
+You are an assistant that creates concise, high-quality term/definition flashcards to help a student study.
+
+Given the course material below, generate up to {num_cards} of the most important flashcards.
+Each flashcard must follow this schema:
+
+[
+  {{
+    "front": "Short term or question",
+    "back": "Clear, student-friendly definition or explanation"
+  }},
+  ...
+]
+
+Rules:
+- Focus on key concepts, definitions, formulas, and important distinctions.
+- Avoid trivial details.
+- The 'front' should be short, like a term or a brief question.
+- The 'back' should be 1–4 sentences, clear and precise.
+- Respond with ONLY valid JSON (a list of objects), no extra text.
+
+COURSE MATERIAL START
+{text}
+COURSE MATERIAL END
+"""
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": "You generate helpful, accurate term/definition flashcards for students.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+    )
+
+    content = response.choices[0].message.content
+
+    # Try to parse the JSON directly
+    try:
+        cards = json.loads(content)
+    except json.JSONDecodeError:
+        # Try to recover by extracting the JSON array substring
+        start = content.find("[")
+        end = content.rfind("]")
+        if start != -1 and end != -1 and start < end:
+            cards = json.loads(content[start : end + 1])
+        else:
+            raise
+
+    cleaned_cards = []
+    for c in cards:
+        if isinstance(c, dict):
+            front = (c.get("front") or c.get("term") or "").strip()
+            back = (c.get("back") or c.get("definition") or "").strip()
+            if front and back:
+                cleaned_cards.append({"front": front, "back": back})
+
+    return cleaned_cards
 
 
 # -----------------------------------------
@@ -497,14 +620,111 @@ with tabs[1]:
 with tabs[2]:
     st.header("AI Flashcard Generator")
     st.write(
-        "This tab will create term/definition flashcards from your uploaded lecture slides, notes, and visuals."
+        "Generate term/definition flashcards from your uploaded lecture slides and notes."
     )
+
     if not selected_course:
         st.warning("Please create and select a course in the sidebar first.")
     else:
-        st.info(
-            f"Flashcard generation for course: **{selected_course['name']}** will be implemented in a later step."
-        )
+        if client is None:
+            st.error(
+                "OpenAI API key not found. Please set OPENAI_API_KEY in a .env file "
+                "before using the flashcard generator."
+            )
+        else:
+            course_id = selected_course["id"]
+            meta = load_course_meta(course_id)
+            files = meta.get("files", [])
+
+            if not files:
+                st.info(
+                    "No files uploaded yet for this course. "
+                    "Upload lecture slides or notes in the Course Materials tab first."
+                )
+            else:
+                st.subheader(f"Generate flashcards for: {selected_course['name']}")
+
+                # Choose which files to include
+                uploads_dir = get_course_dir(course_id) / "uploads"
+                name_to_file = {f["original_name"]: f for f in files}
+
+                default_selection = list(name_to_file.keys())
+                selected_file_names = st.multiselect(
+                    "Select files to include in this flashcard set",
+                    options=list(name_to_file.keys()),
+                    default=default_selection,
+                )
+
+                if not selected_file_names:
+                    st.warning("Please select at least one file to generate flashcards from.")
+                else:
+                    num_cards = st.slider(
+                        "Maximum number of flashcards",
+                        min_value=5,
+                        max_value=40,
+                        value=20,
+                        step=5,
+                    )
+
+                    set_name = st.text_input(
+                        "Flashcard set name",
+                        value="Default set",
+                        help="This name is just for display in this session.",
+                    )
+
+                    if st.button("Generate flashcards"):
+                        # Aggregate text from selected files
+                        all_text_parts = []
+                        for fname in selected_file_names:
+                            f_info = name_to_file[fname]
+                            file_path = uploads_dir / f_info["stored_name"]
+                            extracted = extract_text_from_file(file_path)
+                            if extracted:
+                                all_text_parts.append(extracted)
+
+                        combined_text = "\n\n".join(all_text_parts).strip()
+
+                        if not combined_text:
+                            st.error(
+                                "Could not extract text from the selected files. "
+                                "Try different files or formats (PDF, PPTX, TXT)."
+                            )
+                        else:
+                            with st.spinner("Generating flashcards with AI..."):
+                                try:
+                                    cards = generate_flashcards_from_text(combined_text, num_cards=num_cards)
+                                except Exception as e:
+                                    st.error(f"Error generating flashcards: {e}")
+                                else:
+                                    if not cards:
+                                        st.warning(
+                                            "The AI did not return any valid flashcards. "
+                                            "Try reducing the number of files or simplifying the content."
+                                        )
+                                    else:
+                                        # Store in session so they persist while app is running
+                                        state_key = f"flashcards_{course_id}"
+                                        st.session_state[state_key] = {
+                                            "set_name": set_name,
+                                            "cards": cards,
+                                        }
+                                        st.success(
+                                            f"Generated {len(cards)} flashcard(s) for set: {set_name}"
+                                        )
+
+            # Show flashcards if we have a generated set in this session
+            state_key = f"flashcards_{selected_course['id']}" if selected_course else None
+            if state_key and state_key in st.session_state:
+                flash_state = st.session_state[state_key]
+                st.subheader(f"Flashcard set: {flash_state['set_name']}")
+                st.write(
+                    "Click each card to view the back. You can regenerate a new set at any time."
+                )
+
+                for idx, card in enumerate(flash_state["cards"], start=1):
+                    with st.expander(f"Card {idx}: {card['front']}"):
+                        st.write(card["back"])
+
 
 # 4) Quizzes tab
 with tabs[3]:
