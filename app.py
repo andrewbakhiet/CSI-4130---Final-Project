@@ -81,11 +81,9 @@ def get_course_by_id(course_id: str):
 def delete_course(course_id: str):
     """Delete a course from courses.json and remove its directory from disk."""
     courses = load_courses()
-    # Remove this course from the list
     courses = [c for c in courses if c["id"] != course_id]
     save_courses(courses)
 
-    # Remove course directory (uploads + meta)
     course_dir = get_course_dir(course_id)
     if course_dir.exists():
         shutil.rmtree(course_dir)
@@ -103,7 +101,6 @@ def load_course_meta(course_id: str):
     """Load meta.json for a course (name + files)."""
     meta_path = get_course_meta_path(course_id)
     if not meta_path.exists():
-        # Try to reconstruct a basic meta
         course = get_course_by_id(course_id) or {"id": course_id, "name": "Unknown Course"}
         meta = {"id": course_id, "name": course.get("name", "Unknown Course"), "files": []}
         meta_path.write_text(json.dumps(meta, indent=2))
@@ -137,7 +134,7 @@ def make_unique_filename(folder: Path, original_name: str) -> str:
 
 
 # -----------------------------------------
-# Streamlit UI
+# Streamlit UI setup
 # -----------------------------------------
 
 ensure_data_dirs()
@@ -153,6 +150,23 @@ st.write(
     "An AI-powered study companion that turns your course materials into a study plan, flashcards, quizzes, cheat sheets, and a Q&A chat."
 )
 
+# -----------------------------------------
+# Sidebar state for course name input
+# -----------------------------------------
+
+if "course_name_input_version" not in st.session_state:
+    st.session_state["course_name_input_version"] = 0
+
+if "reset_course_name" not in st.session_state:
+    st.session_state["reset_course_name"] = False
+
+# If we requested a reset last run, bump the version so the widget key changes
+if st.session_state["reset_course_name"]:
+    st.session_state["course_name_input_version"] += 1
+    st.session_state["reset_course_name"] = False
+
+course_name_input_key = f"new_course_name_{st.session_state['course_name_input_version']}"
+
 # -------------------------
 # Sidebar: Course management
 # -------------------------
@@ -163,19 +177,25 @@ course_names = [c["name"] for c in courses]
 
 # Section to create a new course
 st.sidebar.subheader("Create a new course")
-new_course_name = st.sidebar.text_input("New course name", value="")
+
+new_course_name = st.sidebar.text_input(
+    "New course name",
+    key=course_name_input_key,
+)
 
 if st.sidebar.button("Add Course"):
-    if new_course_name.strip() == "":
+    name = new_course_name.strip()
+    if name == "":
         st.sidebar.error("Please enter a course name before adding.")
     else:
-        existing = get_course_by_name(new_course_name.strip())
+        existing = get_course_by_name(name)
         if existing:
             st.sidebar.warning("A course with that name already exists.")
         else:
-            created = create_course(new_course_name.strip())
+            created = create_course(name)
             st.sidebar.success(f"Course '{created['name']}' created.")
-            # Rerun to refresh the sidebar list
+            # Request the input to be cleared on next rerun
+            st.session_state["reset_course_name"] = True
             st.rerun()
 
 # Course selection
@@ -236,13 +256,33 @@ with tabs[0]:
         uploads_dir = course_dir / "uploads"
         uploads_dir.mkdir(parents=True, exist_ok=True)
 
-        # File uploader
+        # -------------------------
+        # Uploader state per course
+        # -------------------------
+        uploader_version_key = f"uploader_version_{course_id}"
+        reset_uploader_flag_key = f"reset_uploader_{course_id}"
+
+        if uploader_version_key not in st.session_state:
+            st.session_state[uploader_version_key] = 0
+        if reset_uploader_flag_key not in st.session_state:
+            st.session_state[reset_uploader_flag_key] = False
+
+        # If requested, bump version so uploader gets a new key and clears its files
+        if st.session_state[reset_uploader_flag_key]:
+            st.session_state[uploader_version_key] += 1
+            st.session_state[reset_uploader_flag_key] = False
+
+        uploader_key = f"uploader_{course_id}_{st.session_state[uploader_version_key]}"
+
         st.write("Upload lecture slides, notes, PDFs, or other course files here.")
+
         uploaded_files = st.file_uploader(
-            "Upload one or more files",
+            "Choose files to upload",
             accept_multiple_files=True,
+            key=uploader_key,
         )
 
+        # Automatically process new uploads once, then clear uploader via version bump
         if uploaded_files:
             meta = load_course_meta(course_id)
             existing_files = meta.get("files", [])
@@ -265,7 +305,11 @@ with tabs[0]:
 
             meta["files"] = existing_files
             save_course_meta(course_id, meta)
+
             st.success(f"Uploaded {len(uploaded_files)} file(s) successfully.")
+
+            # Clear the uploader selection on next run
+            st.session_state[reset_uploader_flag_key] = True
             st.rerun()
 
         # List existing files
@@ -301,6 +345,9 @@ with tabs[0]:
                     meta["files"] = new_files
                     save_course_meta(course_id, meta)
                     st.success(f"Deleted file: {f_info['original_name']}")
+
+                    # Also clear the uploader selection so you don't have to click X
+                    st.session_state[reset_uploader_flag_key] = True
                     st.rerun()
 
         st.info(
