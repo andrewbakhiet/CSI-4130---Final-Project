@@ -3,7 +3,7 @@ import os
 import json
 import shutil
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 # -----------------------------------------
 # Paths and basic storage helpers
@@ -359,14 +359,139 @@ with tabs[0]:
 with tabs[1]:
     st.header("AI Study Schedule Planner")
     st.write(
-        "This tab will generate a personalized exam study plan based on your course materials and exam date."
+        "Generate a high-level study schedule for a specific exam using the files you've uploaded for this course."
     )
+
     if not selected_course:
         st.warning("Please create and select a course in the sidebar first.")
     else:
-        st.info(
-            f"Study planner for course: **{selected_course['name']}** (logic to be implemented in the next steps)."
-        )
+        st.subheader(f"Study planner for: {selected_course['name']}")
+
+        # Load files for this course
+        course_id = selected_course["id"]
+        meta = load_course_meta(course_id)
+        files = meta.get("files", [])
+
+        if not files:
+            st.info(
+                "No files uploaded yet for this course. "
+                "Upload lecture slides or notes in the Course Materials tab first."
+            )
+        else:
+            # Inputs for exam and dates
+            col1, col2 = st.columns(2)
+            with col1:
+                exam_name = st.text_input("Exam name", value="Midterm 1")
+                start_date = st.date_input(
+                    "Start studying on",
+                    value=date.today(),
+                    help="This is the first day you plan to start studying for this exam.",
+                )
+            with col2:
+                exam_date = st.date_input(
+                    "Exam date",
+                    value=date.today(),
+                    help="You will study up to the day before this date.",
+                )
+                hours_per_day = st.slider(
+                    "Target study hours per day for this course",
+                    min_value=1.0,
+                    max_value=8.0,
+                    value=2.0,
+                    step=0.5,
+                )
+
+            if exam_date <= start_date:
+                st.error("The exam date must be after the study start date.")
+            else:
+                num_days = (exam_date - start_date).days  # we study up to exam_date - 1
+
+                st.write(
+                    f"Study window: **{start_date}** to **{exam_date}** "
+                    f"(you have **{num_days}** day(s) to study before the exam)."
+                )
+
+                if st.button("Generate study plan"):
+                    total_weight = sum(f["size_bytes"] for f in files)
+                    if total_weight <= 0:
+                        st.error("Unable to compute workload from files. Please re-upload or add files.")
+                    else:
+                        # Assign continuous date ranges to each file based on size
+                        plan_rows = []
+                        day_index = 0
+                        num_files = len(files)
+
+                        for idx, f_info in enumerate(files):
+                            weight = f_info["size_bytes"]
+                            share = weight / total_weight
+
+                            # Approximate number of days for this file
+                            days_remaining = num_days - day_index
+                            if days_remaining <= 0:
+                                file_days = 0
+                            elif idx == num_files - 1:
+                                # Last file gets all remaining days
+                                file_days = days_remaining
+                            else:
+                                file_days = max(1, min(days_remaining, round(share * num_days)))
+
+                            if file_days > 0:
+                                start_d = start_date + timedelta(days=day_index)
+                                end_d = start_date + timedelta(days=day_index + file_days - 1)
+
+                                est_total_hours = share * num_days * hours_per_day
+
+                                plan_rows.append(
+                                    {
+                                        "File": f_info["original_name"],
+                                        "Suggested start date": str(start_d),
+                                        "Suggested end date": str(end_d),
+                                        "Estimated total hours": round(est_total_hours, 1),
+                                    }
+                                )
+
+                                day_index += file_days
+
+                        # If rounding left some unused days, extend the last file to the final day
+                        if plan_rows and day_index < num_days:
+                            last = plan_rows[-1]
+                            last["Suggested end date"] = str(start_date + timedelta(days=num_days - 1))
+
+                        st.subheader(f"File-level plan for: {exam_name}")
+                        st.write(
+                            "This table shows how the planner allocates your uploaded files across the available study days "
+                            "based on their relative size."
+                        )
+                        if plan_rows:
+                            st.table(plan_rows)
+                        else:
+                            st.info("No days available to schedule. Check your dates.")
+
+                        # Build a simple day-by-day view
+                        st.subheader("Day-by-day study schedule")
+                        daily_rows = []
+                        for offset in range(num_days):
+                            day = start_date + timedelta(days=offset)
+                            files_for_day = [
+                                row["File"]
+                                for row in plan_rows
+                                if date.fromisoformat(row["Suggested start date"])
+                                <= day
+                                <= date.fromisoformat(row["Suggested end date"])
+                            ]
+                            daily_rows.append(
+                                {
+                                    "Date": str(day),
+                                    "Planned study focus": ", ".join(files_for_day) if files_for_day else "—",
+                                    "Suggested hours": hours_per_day if files_for_day else 0.0,
+                                }
+                            )
+
+                        if daily_rows:
+                            st.table(daily_rows)
+                        else:
+                            st.info("No schedule could be generated. Check your dates and files.")
+
 
 # 3) Flashcards tab
 with tabs[2]:
