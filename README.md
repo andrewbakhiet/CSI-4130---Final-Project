@@ -24,13 +24,9 @@ StudyPilot is an AI-powered study companion that organizes course content into a
 - **Course Q&A Chat**  
   Ask questions about your course and get answers grounded in your uploaded notes and slides.
 
-## Tech Stack (Planned)
+## Tech Stack 
 
 - **Language:** Python  
 - **Frontend + Backend:** Streamlit (web app)  
 - **AI Integration:** LLM APIs (e.g., OpenAI GPT-4o for text + images, embeddings)  
 - **Other Tools:** PDF and slide parsers, vector store for retrieval, SQLite or simple file-based storage
-
-## Status
-
-Early development — basic Streamlit app setup and project structure.
