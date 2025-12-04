@@ -9,7 +9,10 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from pypdf import PdfReader
 from pptx import Presentation
-
+import io
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import inch
 
 # -----------------------------------------
 # Paths and basic storage helpers
@@ -428,6 +431,174 @@ COURSE MATERIAL END
         )
 
     return cleaned
+
+
+def generate_cheatsheet_from_text(
+    text: str,
+    sheet_size: str = "3x5",
+    focus: str = "both",
+) -> str:
+    """
+    Call the OpenAI API to generate a compact cheat sheet from the given text.
+
+    Returns a single markdown-formatted string that fits the requested size and focus.
+    """
+    if not client:
+        raise RuntimeError("OpenAI client is not configured. Missing OPENAI_API_KEY.")
+
+    # Trim text so the prompt doesn't get too huge
+    MAX_CHARS = 16000
+    if len(text) > MAX_CHARS:
+        text = text[:MAX_CHARS]
+
+    # Map sheet size to approximate max characters of output.
+    # These are rough guidelines to force brevity.
+    size = sheet_size.lower()
+    if size == "3x5":
+        max_chars_out = 800     # very compact
+        size_desc = "a very compact 3x5 inch notecard"
+    elif size == "1_page":
+        max_chars_out = 2000
+        size_desc = "a single-sided 8.5x11 inch page"
+    else:  # "2_page"
+        max_chars_out = 3500
+        size_desc = "a two-sided 8.5x11 inch page"
+
+    focus = focus.lower()
+    if focus == "formulas":
+        focus_desc = "ONLY key formulas and their very short labels. Avoid prose definitions."
+    elif focus == "definitions":
+        focus_desc = "key concepts and definitions, but not detailed derivations or long explanations."
+    else:
+        focus_desc = "a mix of key formulas, short definitions, and core concepts."
+
+    prompt = f"""
+You are an assistant that creates dense, exam-ready cheat sheets for students.
+
+Given the course material below, create a cheat sheet that would fit on {size_desc}.
+Focus on {focus_desc}
+
+Constraints:
+- Use bullet points and short, clear lines.
+- Prioritize the most important ideas, formulas, and relationships.
+- Avoid full sentences when a shorthand phrase works.
+- Group related items with short headings when helpful.
+- DO NOT include extra commentary about what you're doing.
+- Your entire output must be at most {max_chars_out} characters.
+- Output should be in plain text or simple markdown (headings + bullet points).
+
+COURSE MATERIAL START
+{text}
+COURSE MATERIAL END
+"""
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": "You create concise, well-organized cheat sheets for exams.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+    )
+
+    content = response.choices[0].message.content
+
+    # Extra safety: hard enforce the character limit
+    if len(content) > max_chars_out:
+        content = content[:max_chars_out]
+
+    return content.strip()
+
+
+def build_cheatsheet_pdf(title: str, body: str, sheet_size: str) -> bytes:
+    """
+    Build a simple PDF cheat sheet from the given title and body text.
+    sheet_size: "3x5", "1_page", or "2_page"
+    Returns PDF bytes.
+    """
+    buffer = io.BytesIO()
+
+    # Choose page size
+    if sheet_size == "3x5":
+        # 5x3 inches, landscape notecard
+        pagesize = (5 * inch, 3 * inch)
+    else:
+        # Standard 8.5x11 for both 1_page and 2_page
+        pagesize = letter
+
+    c = canvas.Canvas(buffer, pagesize=pagesize)
+    width, height = pagesize
+
+    # Basic layout parameters
+    margin = 0.35 * inch if sheet_size == "3x5" else 0.75 * inch
+    title_font_size = 10 if sheet_size == "3x5" else 14
+    body_font_size = 7 if sheet_size == "3x5" else 10
+
+    # border
+    c.setLineWidth(1)
+    c.rect(margin / 2, margin / 2, width - margin, height - margin)
+
+    # Draw title
+    if title.strip():
+        c.setFont("Helvetica-Bold", title_font_size)
+        c.drawString(margin, height - margin - title_font_size, title.strip())
+        text_start_y = height - margin - title_font_size * 2
+    else:
+        text_start_y = height - margin
+
+    # Draw body text with simple line wrapping and second page
+    c.setFont("Helvetica", body_font_size)
+    line_height = body_font_size + 2
+    x = margin
+    y = text_start_y
+
+    def draw_text_lines(text_obj, lines_iter):
+        nonlocal x, y
+        for line in lines_iter:
+            if y <= margin:
+                # Start a new page if there is more content
+                c.drawText(text_obj)
+                c.showPage()
+                c.setLineWidth(1)
+                c.rect(margin / 2, margin / 2, width - margin, height - margin)
+                c.setFont("Helvetica", body_font_size)
+                y = height - margin
+                text_obj = c.beginText(x, y)
+
+            text_obj.textLine(line)
+            y -= line_height
+        return text_obj
+
+    # Prepare text object
+    text_obj = c.beginText(x, y)
+
+    # Simple wrapping, manually split long lines into chunks that fit
+    max_chars_per_line = 70 if sheet_size != "3x5" else 45
+    lines = []
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if not line:
+            lines.append("")
+            continue
+        while len(line) > max_chars_per_line:
+            lines.append(line[:max_chars_per_line])
+            line = line[max_chars_per_line:]
+        lines.append(line)
+
+    # Draw lines, possibly using multiple pages
+    text_obj = draw_text_lines(text_obj, iter(lines))
+
+    # If 2 page, allow up to two pages, extra content is simply cut off
+    # (we already limit content length via generate_cheatsheet_from_text)
+    c.drawText(text_obj)
+    c.save()
+
+    pdf_bytes = buffer.getvalue()
+    buffer.close()
+    return pdf_bytes
 
 
 # -----------------------------------------
@@ -1073,14 +1244,157 @@ with tabs[3]:
 with tabs[4]:
     st.header("AI Cheat Sheet Generator")
     st.write(
-        "This tab will build compact cheat sheets (3×5 card, 1 page, or 2-sided) from your key formulas and definitions."
+        "Build a compact cheat sheet (3×5 card, 1 page, or 2-sided) from your uploaded course materials."
     )
+
     if not selected_course:
         st.warning("Please create and select a course in the sidebar first.")
     else:
-        st.info(
-            f"Cheat sheet generation for course: **{selected_course['name']}** will be implemented in a later step."
-        )
+        if client is None:
+            st.error(
+                "OpenAI API key not found. Please set OPENAI_API_KEY in a .env file "
+                "before using the cheat sheet generator."
+            )
+        else:
+            course_id = selected_course["id"]
+            meta = load_course_meta(course_id)
+            files = meta.get("files", [])
+
+            if not files:
+                st.info(
+                    "No files uploaded yet for this course. "
+                    "Upload lecture slides or notes in the Course Materials tab first."
+                )
+            else:
+                uploads_dir = get_course_dir(course_id) / "uploads"
+                name_to_file = {f["original_name"]: f for f in files}
+
+                st.subheader(f"Generate cheat sheet for: {selected_course['name']}")
+
+                selected_file_names = st.multiselect(
+                    "Select files to include",
+                    options=list(name_to_file.keys()),
+                    default=list(name_to_file.keys()),
+                )
+
+                if not selected_file_names:
+                    st.warning("Please select at least one file to generate a cheat sheet from.")
+                else:
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        sheet_size_label = st.selectbox(
+                            "Cheat sheet size",
+                            options=["3×5 Notecard", "1 Page", "2-Sided Page"],
+                            index=1,
+                            help="This affects how compact the cheat sheet will be.",
+                        )
+                    with col2:
+                        focus_label = st.selectbox(
+                            "Content focus",
+                            options=["Formulas only", "Definitions/concepts", "Both"],
+                            index=2,
+                            help="Choose what type of content to emphasize.",
+                        )
+
+                    # Map labels to internal codes
+                    size_map = {
+                        "3×5 Notecard": "3x5",
+                        "1 Page": "1_page",
+                        "2-Sided Page": "2_page",
+                    }
+                    focus_map = {
+                        "Formulas only": "formulas",
+                        "Definitions/concepts": "definitions",
+                        "Both": "both",
+                    }
+
+                    sheet_size = size_map[sheet_size_label]
+                    focus = focus_map[focus_label]
+
+                    custom_title = st.text_input(
+                        "Optional cheat sheet title",
+                        value="Exam Cheat Sheet",
+                        help="This will appear at the top of the generated cheat sheet.",
+                    )
+
+                    if st.button("Generate cheat sheet"):
+                        # Aggregate text from selected files
+                        all_text_parts = []
+                        for fname in selected_file_names:
+                            f_info = name_to_file[fname]
+                            file_path = uploads_dir / f_info["stored_name"]
+                            extracted = extract_text_from_file(file_path)
+                            if extracted:
+                                all_text_parts.append(extracted)
+
+                        combined_text = "\n\n".join(all_text_parts).strip()
+
+                        if not combined_text:
+                            st.error(
+                                "Could not extract text from the selected files. "
+                                "Try different files or formats (PDF, PPTX, TXT)."
+                            )
+                        else:
+                            with st.spinner("Generating cheat sheet with AI..."):
+                                try:
+                                    body = generate_cheatsheet_from_text(
+                                        combined_text,
+                                        sheet_size=sheet_size,
+                                        focus=focus,
+                                    )
+                                except Exception as e:
+                                    st.error(f"Error generating cheat sheet: {e}")
+                                else:
+                                    # Build display text (Markdown-style)
+                                    full_text = body
+                                    if custom_title.strip():
+                                        full_text = f"# {custom_title.strip()}\n\n" + body
+
+                                    # Build PDF bytes matching the selected size
+                                    pdf_bytes = build_cheatsheet_pdf(
+                                        title=custom_title.strip() or "Exam Cheat Sheet",
+                                        body=body,
+                                        sheet_size=sheet_size,
+                                    )
+
+                                    state_key = f"cheatsheet_{course_id}"
+                                    st.session_state[state_key] = {
+                                        "title": custom_title.strip() or "Exam Cheat Sheet",
+                                        "text": full_text,
+                                        "pdf_bytes": pdf_bytes,
+                                        "sheet_size": sheet_size_label,
+                                    }
+                                    st.success("Cheat sheet generated successfully.")
+
+
+            # Display cheat sheet
+            cheatsheet_state_key = f"cheatsheet_{selected_course['id']}" if selected_course else None
+            if cheatsheet_state_key and cheatsheet_state_key in st.session_state:
+                cs = st.session_state[cheatsheet_state_key]
+                st.subheader("Generated Cheat Sheet")
+
+                # Show markdown preview
+                st.markdown(cs["text"])
+
+                st.write(f"Format: **{cs['sheet_size']}**")
+
+                # Download as PDF
+                st.download_button(
+                    label="Download cheat sheet as PDF",
+                    data=cs["pdf_bytes"],
+                    file_name=f"{cs['title'].replace(' ', '_')}.pdf",
+                    mime="application/pdf",
+                )
+
+                # still offer plain text download
+                st.download_button(
+                    label="Download as .txt",
+                    data=cs["text"],
+                    file_name=f"{cs['title'].replace(' ', '_')}.txt",
+                    mime="text/plain",
+                )
+
+
 
 # 6) Q&A Chat tab
 with tabs[5]:

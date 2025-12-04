@@ -3,3 +3,4 @@ python-dotenv
 openai
 pypdf
 python-pptx
+reportlab
