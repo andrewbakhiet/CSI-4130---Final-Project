@@ -1145,7 +1145,7 @@ with tabs[2]:
                     st.warning("Please select at least one file to generate flashcards from.")
                 else:
                     num_cards = st.slider(
-                        "Number of flashcards",
+                        "Approximate Number of Flashcards",
                         min_value=5,
                         max_value=100,
                         value=20,
