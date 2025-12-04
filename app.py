@@ -255,6 +255,180 @@ COURSE MATERIAL END
 
     return cleaned_cards
 
+def generate_quiz_from_text(
+    text: str,
+    num_questions: int = 10,
+    difficulty: str = "mixed",
+    include_mcq: bool = True,
+    include_tf: bool = True,
+) -> list[dict]:
+    """
+    Call the OpenAI API to generate quiz questions from the given text.
+
+    Returns a list of dicts, each like:
+    {
+        "type": "mcq" or "true_false",
+        "question": "...",
+        "options": ["A", "B", "C", "D"] or ["True", "False"],
+        "correct_answer": "A" or "True" etc,
+        "difficulty": "easy"/"medium"/"hard",
+        "explanation": "..."
+    }
+    """
+    if not client:
+        raise RuntimeError("OpenAI client is not configured. Missing OPENAI_API_KEY.")
+
+    MAX_CHARS = 12000
+    if len(text) > MAX_CHARS:
+        text = text[:MAX_CHARS]
+
+    # Describe which types to include for the prompt
+    if include_mcq and include_tf:
+        type_desc = "a mix of multiple-choice and true/false questions"
+    elif include_mcq:
+        type_desc = "multiple-choice questions only"
+    elif include_tf:
+        type_desc = "true/false questions only"
+    else:
+        # Should be prevented by the UI, but just in case:
+        raise ValueError("At least one of include_mcq or include_tf must be True.")
+
+    difficulty = difficulty.lower()
+    if difficulty not in ["easy", "medium", "hard", "mixed"]:
+        difficulty = "mixed"
+
+    difficulty_instruction = (
+        "Use a mix of easy, medium, and hard questions."
+        if difficulty == "mixed"
+        else f"Make all questions roughly {difficulty} difficulty."
+    )
+
+    prompt = f"""
+You are an assistant that creates high-quality quiz questions to help a student study.
+
+Given the course material below, generate up to {num_questions} {type_desc}.
+{difficulty_instruction}
+
+Output format (JSON):
+
+[
+  {{
+    "type": "mcq" or "true_false",
+    "question": "The question text",
+    "options": ["option1", "option2", "option3", "option4"],  // For mcq only
+    "correct_answer": "one of the options, or 'True'/'False' for true_false",
+    "difficulty": "easy" or "medium" or "hard",
+    "explanation": "1-3 sentence explanation of why the answer is correct"
+  }},
+  ...
+]
+
+Rules:
+- For multiple-choice (mcq):
+  - Provide exactly 4 options.
+  - The correct_answer must match one of the options exactly.
+- For true_false:
+  - The options field can be omitted or set to ["True", "False"].
+  - The correct_answer must be exactly "True" or "False".
+- Focus on important concepts, formulas, and distinctions.
+- Avoid trivial or overly obscure details.
+- Respond with ONLY valid JSON, no extra commentary.
+
+COURSE MATERIAL START
+{text}
+COURSE MATERIAL END
+"""
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": "You generate clear, accurate quiz questions for students.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.3,
+    )
+
+    content = response.choices[0].message.content
+
+    try:
+        questions = json.loads(content)
+    except json.JSONDecodeError:
+        # Try to recover by extracting the JSON array substring
+        start = content.find("[")
+        end = content.rfind("]")
+        if start != -1 and end != -1 and start < end:
+            questions = json.loads(content[start : end + 1])
+        else:
+            raise
+
+    cleaned = []
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+
+        q_type = (q.get("type") or "").strip().lower()
+        if q_type in ["mcq", "multiple_choice", "multiple-choice"]:
+            q_type = "mcq"
+        elif q_type in ["true_false", "true-false", "tf"]:
+            q_type = "true_false"
+        else:
+            # Skip unknown types
+            continue
+
+        question_text = (q.get("question") or "").strip()
+        if not question_text:
+            continue
+
+        options = q.get("options")
+        if q_type == "mcq":
+            # Ensure we have 4 options
+            if not isinstance(options, list) or len(options) < 2:
+                continue
+            # Trim and keep up to 4
+            options = [str(o).strip() for o in options if str(o).strip()]
+            if len(options) < 2:
+                continue
+            options = options[:4]
+        else:
+            # true/false
+            options = ["True", "False"]
+
+        correct = (q.get("correct_answer") or "").strip()
+        if q_type == "mcq":
+            # Correct must match one of the options
+            if correct not in options:
+                # Try case-insensitive match
+                lowered = [o.lower() for o in options]
+                if correct.lower() in lowered:
+                    correct = options[lowered.index(correct.lower())]
+                else:
+                    continue
+        else:
+            if correct not in ["True", "False"]:
+                continue
+
+        difficulty_val = (q.get("difficulty") or "").strip().lower()
+        if difficulty_val not in ["easy", "medium", "hard"]:
+            difficulty_val = "medium"
+
+        explanation = (q.get("explanation") or "").strip()
+
+        cleaned.append(
+            {
+                "type": q_type,
+                "question": question_text,
+                "options": options,
+                "correct_answer": correct,
+                "difficulty": difficulty_val,
+                "explanation": explanation,
+            }
+        )
+
+    return cleaned
+
 
 # -----------------------------------------
 # Streamlit UI setup
@@ -659,9 +833,9 @@ with tabs[2]:
                     st.warning("Please select at least one file to generate flashcards from.")
                 else:
                     num_cards = st.slider(
-                        "Maximum number of flashcards",
+                        "Number of flashcards",
                         min_value=5,
-                        max_value=40,
+                        max_value=100,
                         value=20,
                         step=5,
                     )
@@ -730,14 +904,170 @@ with tabs[2]:
 with tabs[3]:
     st.header("AI Quiz Generator")
     st.write(
-        "This tab will generate multiple-choice and true/false quizzes from your course content."
+        "Generate multiple-choice and true/false questions from your uploaded course materials."
     )
+
     if not selected_course:
         st.warning("Please create and select a course in the sidebar first.")
     else:
-        st.info(
-            f"Quiz generation for course: **{selected_course['name']}** will be implemented in a later step."
-        )
+        if client is None:
+            st.error(
+                "OpenAI API key not found. Please set OPENAI_API_KEY in a .env file "
+                "before using the quiz generator."
+            )
+        else:
+            course_id = selected_course["id"]
+            meta = load_course_meta(course_id)
+            files = meta.get("files", [])
+
+            if not files:
+                st.info(
+                    "No files uploaded yet for this course. "
+                    "Upload lecture slides or notes in the Course Materials tab first."
+                )
+            else:
+                uploads_dir = get_course_dir(course_id) / "uploads"
+                name_to_file = {f["original_name"]: f for f in files}
+
+                st.subheader(f"Generate quiz for: {selected_course['name']}")
+
+                selected_file_names = st.multiselect(
+                    "Select files to include in this quiz",
+                    options=list(name_to_file.keys()),
+                    default=list(name_to_file.keys()),
+                )
+
+                if not selected_file_names:
+                    st.warning("Please select at least one file to generate questions from.")
+                else:
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        num_questions = st.slider(
+                            "Approximate Number of Questions",
+                            min_value=5,
+                            max_value=40,
+                            value=10,
+                            step=1,
+                        )
+                    with col2:
+                        difficulty_choice = st.selectbox(
+                            "Difficulty",
+                            options=["Mixed", "Easy", "Medium", "Hard"],
+                            index=0,
+                            help="You can choose a single difficulty or let the AI mix them.",
+                        )
+                    with col3:
+                        include_mcq = st.checkbox("Include MCQ", value=True)
+                        include_tf = st.checkbox("Include True/False", value=True)
+
+                    if not include_mcq and not include_tf:
+                        st.error("Please select at least one question type (MCQ or True/False).")
+                    else:
+                        if st.button("Generate quiz"):
+                            # Aggregate text from selected files
+                            all_text_parts = []
+                            for fname in selected_file_names:
+                                f_info = name_to_file[fname]
+                                file_path = uploads_dir / f_info["stored_name"]
+                                extracted = extract_text_from_file(file_path)
+                                if extracted:
+                                    all_text_parts.append(extracted)
+
+                            combined_text = "\n\n".join(all_text_parts).strip()
+
+                            if not combined_text:
+                                st.error(
+                                    "Could not extract text from the selected files. "
+                                    "Try different files or formats (PDF, PPTX, TXT)."
+                                )
+                            else:
+                                with st.spinner("Generating quiz with AI..."):
+                                    try:
+                                        questions = generate_quiz_from_text(
+                                            combined_text,
+                                            num_questions=num_questions,
+                                            difficulty=difficulty_choice,
+                                            include_mcq=include_mcq,
+                                            include_tf=include_tf,
+                                        )
+                                    except Exception as e:
+                                        st.error(f"Error generating quiz: {e}")
+                                    else:
+                                        if not questions:
+                                            st.warning(
+                                                "The AI did not return any valid questions. "
+                                                "Try adjusting the number of questions or selected files."
+                                            )
+                                        else:
+                                            state_key = f"quiz_{course_id}"
+                                            st.session_state[state_key] = {
+                                                "questions": questions,
+                                                "meta": {
+                                                    "num_questions": len(questions),
+                                                    "difficulty": difficulty_choice,
+                                                },
+                                            }
+                                            st.success(f"Generated {len(questions)} question(s).")
+
+            # Display quiz questions if we have a set in session
+            quiz_state_key = f"quiz_{selected_course['id']}" if selected_course else None
+            if quiz_state_key and quiz_state_key in st.session_state:
+                quiz_state = st.session_state[quiz_state_key]
+                questions = quiz_state["questions"]
+
+                st.subheader("Generated Quiz")
+                st.write(
+                    "Select an answer for each question. Feedback and explanations will appear after you choose."
+                )
+
+                course_id = selected_course["id"]
+                total_answered = 0
+                total_correct = 0
+
+                for idx, q in enumerate(questions, start=1):
+                    display_type = "MCQ"
+                    if q["type"] == "true_false":
+                        display_type = "T/F"
+
+                    q_label = f"Q{idx} [{display_type} | {q['difficulty'].capitalize()}]"
+                    st.markdown(f"### {q_label}")
+
+
+                    # Options for this question
+                    options = q["options"] if q["type"] == "mcq" else ["True", "False"]
+
+                    # Unique key per question so selection is remembered
+                    q_key = f"quiz_{course_id}_q_{idx}"
+
+                    selected = st.radio(
+                        "Your answer:",
+                        options,
+                        index=None,  # No default selection
+                        key=q_key,
+                    )
+
+                    # Only evaluate once the user has picked something
+                    if selected is not None:
+                        total_answered += 1
+                        if selected == q["correct_answer"]:
+                            total_correct += 1
+                            st.success("✅ Correct!")
+                        else:
+                            st.error(f"❌ Incorrect. Correct answer: **{q['correct_answer']}**")
+
+                        if q["explanation"]:
+                            st.info(f"Explanation: {q['explanation']}")
+
+                    st.markdown("---")
+
+                # Simple score summary
+                st.subheader("Quiz Progress")
+                st.write(
+                    f"Answered **{total_answered}** out of **{len(questions)}** questions. "
+                    f"Correct so far: **{total_correct}**."
+                )
+
+
 
 # 5) Cheat Sheets tab
 with tabs[4]:
