@@ -2,7 +2,7 @@
 
 ## Overview
 
-StudyPilot is an AI-powered study companion that organizes course content into a personalized exam plan, interactive flashcards, practice quizzes, compact cheat sheets, and a chat interface based on your uploaded course materials.
+StudyPilot is an AI-powered study companion that organizes course content into a personalized exam plan, flashcards, practice quizzes, compact cheat sheets, and a chat interface based on your uploaded course materials.
 
 ### Planned Features
 
