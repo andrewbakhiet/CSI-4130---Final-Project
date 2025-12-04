@@ -1541,7 +1541,7 @@ with tabs[4]:
 with tabs[5]:
     st.header("Course Q&A Chat")
     st.write(
-        "Ask questions about this course and get answers grounded in your uploaded materials."
+        "Ask questions about your course content and get answers based on your uploaded materials."
     )
 
     if not selected_course:
