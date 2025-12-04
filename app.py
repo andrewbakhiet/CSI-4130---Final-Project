@@ -59,7 +59,7 @@ def save_courses(courses):
 def create_course(course_name: str):
     """Create a new course with a unique id."""
     courses = load_courses()
-    # Simple id scheme: course_1, course_2, ...
+    # Simple id structure
     existing_ids = [c["id"] for c in courses]
     new_index = len(existing_ids) + 1
     new_id = f"course_{new_index}"
@@ -68,7 +68,7 @@ def create_course(course_name: str):
     courses.append(new_course)
     save_courses(courses)
 
-    # Create course directory + meta
+    # Create course directory
     course_dir = COURSES_DIR / new_id
     course_dir.mkdir(parents=True, exist_ok=True)
     meta_path = course_dir / "meta.json"
@@ -178,10 +178,9 @@ def extract_text_from_file(file_path: Path) -> str:
             return file_path.read_text(errors="ignore")
 
         else:
-            # Unsupported type for now
+            # Unsupported for now
             return ""
     except Exception:
-        # If anything goes wrong parsing a file, just skip its content
         return ""
 
 
@@ -287,7 +286,7 @@ def generate_quiz_from_text(
     if len(text) > MAX_CHARS:
         text = text[:MAX_CHARS]
 
-    # Describe which types to include for the prompt
+    # Describe types to include
     if include_mcq and include_tf:
         type_desc = "a mix of multiple-choice and true/false questions"
     elif include_mcq:
@@ -295,7 +294,7 @@ def generate_quiz_from_text(
     elif include_tf:
         type_desc = "true/false questions only"
     else:
-        # Should be prevented by the UI, but just in case:
+        # Prompt user to select one type
         raise ValueError("At least one of include_mcq or include_tf must be True.")
 
     difficulty = difficulty.lower()
@@ -968,7 +967,7 @@ with tabs[0]:
 with tabs[1]:
     st.header("AI Study Schedule Planner")
     st.write(
-        "Generate a high-level study schedule for a specific exam using the files you've uploaded for this course."
+        "Generate a study schedule for your next exam using the files you've uploaded for this course."
     )
 
     if not selected_course:
@@ -1204,7 +1203,7 @@ with tabs[2]:
                 flash_state = st.session_state[state_key]
                 st.subheader(f"Flashcard set: {flash_state['set_name']}")
                 st.write(
-                    "Click each card to view the back. You can regenerate a new set at any time."
+                    "Click each card to expand."
                 )
 
                 for idx, card in enumerate(flash_state["cards"], start=1):
@@ -1337,12 +1336,20 @@ with tabs[3]:
                 total_correct = 0
 
                 for idx, q in enumerate(questions, start=1):
+                    # Display header with type + difficulty
                     display_type = "MCQ"
                     if q["type"] == "true_false":
-                        display_type = "T/F"
+                        display_type = "T/F"  
 
                     q_label = f"Q{idx} [{display_type} | {q['difficulty'].capitalize()}]"
                     st.markdown(f"### {q_label}")
+
+                    # Show the question
+                    question_text = (q.get("question") or "").strip()
+                    if question_text:
+                        st.markdown(f"**{question_text}**")
+                    else:
+                        st.markdown("_(Question text missing)_")
 
 
                     # Options for this question
@@ -1352,10 +1359,11 @@ with tabs[3]:
                     q_key = f"quiz_{course_id}_q_{idx}"
 
                     selected = st.radio(
-                        "Your answer:",
+                        "Select an answer",
                         options,
-                        index=None,  # No default selection
+                        index=None,
                         key=q_key,
+                        label_visibility="collapsed",
                     )
 
                     # Only evaluate once the user has picked something
@@ -1514,7 +1522,7 @@ with tabs[4]:
                 cs = st.session_state[cheatsheet_state_key]
                 st.subheader("Generated Cheat Sheet")
 
-                # Show markdown preview
+                # markdown preview
                 st.markdown(cs["text"])
 
                 st.write(f"Format: **{cs['sheet_size']}**")
@@ -1527,7 +1535,7 @@ with tabs[4]:
                     mime="application/pdf",
                 )
 
-                # still offer plain text download
+                # plain text download
                 st.download_button(
                     label="Download as .txt",
                     data=cs["text"],
@@ -1578,7 +1586,7 @@ with tabs[5]:
                 if not selected_file_names:
                     st.warning("Please select at least one file so the assistant has context.")
                 else:
-                    # Initialize chat history for this course
+                    # Initialize chat history for course
                     history_key = f"qa_history_{course_id}"
                     if history_key not in st.session_state:
                         st.session_state[history_key] = []
@@ -1595,7 +1603,7 @@ with tabs[5]:
 
                     # Chat input
                     user_question = st.chat_input(
-                        "Ask a question about this course (definitions, concepts, explanations, etc.)"
+                        "Ask a question about your course material"
                     )
 
                     if user_question:
@@ -1634,5 +1642,5 @@ with tabs[5]:
                             {"role": "assistant", "content": assistant_reply}
                         )
 
-                        # Rerun so the new messages appear immediately
+                        # Rerun
                         st.rerun()
