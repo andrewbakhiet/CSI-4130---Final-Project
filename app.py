@@ -13,6 +13,8 @@ import io
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import inch
+import textwrap
+import re
 
 # -----------------------------------------
 # Paths and basic storage helpers
@@ -513,11 +515,31 @@ COURSE MATERIAL END
     return content.strip()
 
 
+def strip_basic_markdown(text: str) -> str:
+    """
+    Remove simple markdown formatting markers like **bold**, __bold__, and inline `code`
+    while keeping the inner text.
+    """
+    # bold: **text**
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    # bold via __text__
+    text = re.sub(r"__(.+?)__", r"\1", text)
+    # inline code: `text`
+    text = text.replace("`", "")
+    return text
+
+
+
 def build_cheatsheet_pdf(title: str, body: str, sheet_size: str) -> bytes:
     """
-    Build a simple PDF cheat sheet from the given title and body text.
+    Build a PDF cheat sheet from the given title and body text.
+
     sheet_size: "3x5", "1_page", or "2_page"
     Returns PDF bytes.
+
+    - 3x5: single small landscape notecard, 1 page max.
+    - 1_page: letter page, 2 columns, 1 page max (extra text truncated).
+    - 2_page: letter, 2 columns, up to 2 pages (extra text truncated).
     """
     buffer = io.BytesIO()
 
@@ -525,74 +547,144 @@ def build_cheatsheet_pdf(title: str, body: str, sheet_size: str) -> bytes:
     if sheet_size == "3x5":
         # 5x3 inches, landscape notecard
         pagesize = (5 * inch, 3 * inch)
+        max_pages = 1
+        num_columns = 1
     else:
         # Standard 8.5x11 for both 1_page and 2_page
         pagesize = letter
+        num_columns = 2
+        max_pages = 1 if sheet_size == "1_page" else 2
 
     c = canvas.Canvas(buffer, pagesize=pagesize)
     width, height = pagesize
 
-    # Basic layout parameters
+    # Layout parameters
     margin = 0.35 * inch if sheet_size == "3x5" else 0.75 * inch
     title_font_size = 10 if sheet_size == "3x5" else 14
     body_font_size = 7 if sheet_size == "3x5" else 10
-
-    # border
-    c.setLineWidth(1)
-    c.rect(margin / 2, margin / 2, width - margin, height - margin)
-
-    # Draw title
-    if title.strip():
-        c.setFont("Helvetica-Bold", title_font_size)
-        c.drawString(margin, height - margin - title_font_size, title.strip())
-        text_start_y = height - margin - title_font_size * 2
-    else:
-        text_start_y = height - margin
-
-    # Draw body text with simple line wrapping and second page
-    c.setFont("Helvetica", body_font_size)
     line_height = body_font_size + 2
-    x = margin
-    y = text_start_y
 
-    def draw_text_lines(text_obj, lines_iter):
-        nonlocal x, y
-        for line in lines_iter:
-            if y <= margin:
-                # Start a new page if there is more content
-                c.drawText(text_obj)
+    # Column settings
+    if num_columns == 1:
+        column_gap = 0.0
+        column_width = width - 2 * margin
+    else:
+        column_gap = 0.3 * inch
+        column_width = (width - 2 * margin - column_gap) / 2.0
+
+    # We approximate how many characters fit in a line based on the column width.
+    # This is rough but helps avoid overly long lines.
+    avg_char_width = body_font_size * 0.55  # heuristic
+    max_chars_per_line = max(25, int(column_width / avg_char_width))
+
+    # Optional border so it visually looks like a card/page
+    def draw_border():
+        c.setLineWidth(1)
+        c.rect(margin / 2, margin / 2, width - margin, height - margin)
+
+    def start_page(page_number: int):
+        c.setFont("Helvetica", body_font_size)
+        draw_border()
+        # Title on first page only
+        if page_number == 1 and title.strip():
+            c.setFont("Helvetica-Bold", title_font_size)
+            c.drawString(margin, height - margin - title_font_size, title.strip())
+            y_start = height - margin - title_font_size * 2
+        else:
+            y_start = height - margin
+        c.setFont("Helvetica", body_font_size)
+        return y_start
+
+    # Prepare lines: parse simple markdown-style headings & bullets, wrap at word boundaries
+    processed_lines = []
+    for raw_line in body.splitlines():
+        # Clean up markdown markers like **bold** so the PDF doesn't show the asterisks
+        raw_line = strip_basic_markdown(raw_line)
+        stripped = raw_line.strip()
+        if not stripped:
+            processed_lines.append("")
+            continue
+
+        # Headings: #, ##, ### -> uppercase, add a blank line before
+        if stripped.startswith("### "):
+            heading_text = stripped[4:].strip()
+            if heading_text:
+                processed_lines.append("")
+                for wrap_line in textwrap.wrap(heading_text.upper(), width=max_chars_per_line):
+                    processed_lines.append(wrap_line)
+            continue
+        elif stripped.startswith("## "):
+            heading_text = stripped[3:].strip()
+            if heading_text:
+                processed_lines.append("")
+                for wrap_line in textwrap.wrap(heading_text.upper(), width=max_chars_per_line):
+                    processed_lines.append(wrap_line)
+            continue
+        elif stripped.startswith("# "):
+            heading_text = stripped[2:].strip()
+            if heading_text:
+                processed_lines.append("")
+                for wrap_line in textwrap.wrap(heading_text.upper(), width=max_chars_per_line):
+                    processed_lines.append(wrap_line)
+            continue
+
+        # Bullets: "- " or "• " -> "• " with hanging indent
+        if stripped.startswith("- ") or stripped.startswith("• "):
+            bullet_text = stripped[2:].strip()
+            wrapped = textwrap.wrap(bullet_text, width=max_chars_per_line) or [""]
+            for i, w in enumerate(wrapped):
+                if i == 0:
+                    processed_lines.append("• " + w)
+                else:
+                    processed_lines.append("  " + w)
+        else:
+            # Normal text line, word-wrapped
+            wrapped = textwrap.wrap(stripped, width=max_chars_per_line) or [""]
+            processed_lines.extend(wrapped)
+
+
+    # Drawing text in columns, respecting max_pages
+    page_number = 1
+    current_column = 0
+    y = start_page(page_number)
+
+    # Precompute column x positions
+    column_x_positions = [
+        margin + i * (column_width + column_gap) for i in range(num_columns)
+    ]
+
+    text_obj = c.beginText(column_x_positions[current_column], y)
+
+    for line in processed_lines:
+        # If out of vertical space, move to next column or next page
+        if y <= margin:
+            # Finish current column
+            c.drawText(text_obj)
+
+            current_column += 1
+            if current_column < num_columns:
+                # Next column on same page
+                y = height - margin
+                text_obj = c.beginText(column_x_positions[current_column], y)
+            else:
+                # Need a new page
+                if page_number >= max_pages:
+                    # We've reached the max allowed pages; stop drawing further lines
+                    break
                 c.showPage()
-                c.setLineWidth(1)
-                c.rect(margin / 2, margin / 2, width - margin, height - margin)
+                page_number += 1
+                draw_border()
+                # Title only on first page; other pages start directly with body
                 c.setFont("Helvetica", body_font_size)
                 y = height - margin
-                text_obj = c.beginText(x, y)
+                current_column = 0
+                text_obj = c.beginText(column_x_positions[current_column], y)
 
-            text_obj.textLine(line)
-            y -= line_height
-        return text_obj
+        # Draw the line
+        text_obj.textLine(line)
+        y -= line_height
 
-    # Prepare text object
-    text_obj = c.beginText(x, y)
-
-    # Simple wrapping, manually split long lines into chunks that fit
-    max_chars_per_line = 70 if sheet_size != "3x5" else 45
-    lines = []
-    for raw_line in body.splitlines():
-        line = raw_line.strip()
-        if not line:
-            lines.append("")
-            continue
-        while len(line) > max_chars_per_line:
-            lines.append(line[:max_chars_per_line])
-            line = line[max_chars_per_line:]
-        lines.append(line)
-
-    # Draw lines, possibly using multiple pages
-    text_obj = draw_text_lines(text_obj, iter(lines))
-
-    # If 2 page, allow up to two pages, extra content is simply cut off
-    # (we already limit content length via generate_cheatsheet_from_text)
+    # Draw remaining text object and finish
     c.drawText(text_obj)
     c.save()
 
