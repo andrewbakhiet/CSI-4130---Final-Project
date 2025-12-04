@@ -514,6 +514,55 @@ COURSE MATERIAL END
 
     return content.strip()
 
+def answer_question_with_materials(material_text: str, question: str) -> str:
+    """
+    Use the OpenAI API to answer a question based on the given course material text.
+    The model is instructed to rely primarily on the provided material and to say
+    when something is not covered.
+    """
+    if not client:
+        raise RuntimeError("OpenAI client is not configured. Missing OPENAI_API_KEY.")
+
+    # Keep context within a reasonable limit
+    MAX_CHARS = 16000
+    if len(material_text) > MAX_CHARS:
+        material_text = material_text[:MAX_CHARS]
+
+    prompt = f"""
+You are a helpful study assistant for a university student.
+
+You are given course materials (slides, notes, etc.) and then a question.
+Your job is to answer the question as clearly and concisely as possible,
+based primarily on the given materials.
+
+If the materials do NOT provide enough information to fully answer,
+say so explicitly and explain what is missing, rather than guessing.
+
+COURSE MATERIALS:
+-----------------
+{material_text}
+
+QUESTION:
+---------
+{question}
+"""
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a careful, concise tutor. Base your answers on the provided course materials.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+    )
+
+    answer = response.choices[0].message.content
+    return answer.strip()
+
+
 
 def strip_basic_markdown(text: str) -> str:
     """
@@ -1492,11 +1541,98 @@ with tabs[4]:
 with tabs[5]:
     st.header("Course Q&A Chat")
     st.write(
-        "This tab will let you ask questions about your course and get answers grounded in your uploaded materials."
+        "Ask questions about this course and get answers grounded in your uploaded materials."
     )
+
     if not selected_course:
         st.warning("Please create and select a course in the sidebar first.")
     else:
-        st.info(
-            f"Q&A chat for course: **{selected_course['name']}** will be implemented in a later step."
-        )
+        if client is None:
+            st.error(
+                "OpenAI API key not found. Please set OPENAI_API_KEY in a .env file "
+                "before using the Q&A chat."
+            )
+        else:
+            course_id = selected_course["id"]
+            meta = load_course_meta(course_id)
+            files = meta.get("files", [])
+
+            if not files:
+                st.info(
+                    "No files uploaded yet for this course. "
+                    "Upload lecture slides or notes in the Course Materials tab first."
+                )
+            else:
+                uploads_dir = get_course_dir(course_id) / "uploads"
+                name_to_file = {f["original_name"]: f for f in files}
+
+                st.subheader(f"Chat about: {selected_course['name']}")
+
+                selected_file_names = st.multiselect(
+                    "Select files to use as context for answers",
+                    options=list(name_to_file.keys()),
+                    default=list(name_to_file.keys()),
+                    help="The assistant will base its answers primarily on these files.",
+                )
+
+                if not selected_file_names:
+                    st.warning("Please select at least one file so the assistant has context.")
+                else:
+                    # Initialize chat history for this course
+                    history_key = f"qa_history_{course_id}"
+                    if history_key not in st.session_state:
+                        st.session_state[history_key] = []
+
+                    # Show existing chat history
+                    st.write("### Chat")
+                    for msg in st.session_state[history_key]:
+                        if msg["role"] == "user":
+                            with st.chat_message("user"):
+                                st.markdown(msg["content"])
+                        else:
+                            with st.chat_message("assistant"):
+                                st.markdown(msg["content"])
+
+                    # Chat input
+                    user_question = st.chat_input(
+                        "Ask a question about this course (definitions, concepts, explanations, etc.)"
+                    )
+
+                    if user_question:
+                        # Add user message to history
+                        st.session_state[history_key].append(
+                            {"role": "user", "content": user_question}
+                        )
+
+                        # Build material context from selected files
+                        all_text_parts = []
+                        for fname in selected_file_names:
+                            f_info = name_to_file[fname]
+                            file_path = uploads_dir / f_info["stored_name"]
+                            extracted = extract_text_from_file(file_path)
+                            if extracted:
+                                all_text_parts.append(extracted)
+
+                        combined_text = "\n\n".join(all_text_parts).strip()
+
+                        if not combined_text:
+                            assistant_reply = (
+                                "I couldn't extract any readable text from the selected files. "
+                                "Try different files or formats (PDF, PPTX, TXT)."
+                            )
+                        else:
+                            try:
+                                with st.spinner("Thinking..."):
+                                    assistant_reply = answer_question_with_materials(
+                                        combined_text, user_question
+                                    )
+                            except Exception as e:
+                                assistant_reply = f"Error while answering: {e}"
+
+                        # Add assistant response to history
+                        st.session_state[history_key].append(
+                            {"role": "assistant", "content": assistant_reply}
+                        )
+
+                        # Rerun so the new messages appear immediately
+                        st.rerun()
